@@ -1,0 +1,4 @@
+.env
+bot/grades.db
+.idea
+bot/__pycache__/
