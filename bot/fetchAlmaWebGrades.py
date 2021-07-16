@@ -1,29 +1,21 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from urllib import error
 from bs4 import BeautifulSoup
-import traceback
 import requests
 import sqlite3
 import telegram
 import os
-import sys
 import initDB
-from datetime import datetime
 from dotenv import load_dotenv
+import logging
+import json
+
 
 load_dotenv()
 
 
 def findGrades(url, session):
-    print("fetching data " + url)
-    try:
-        response = session.get(url)
-    except:
-        traceback.print_exc()
-        print("Cannot connect to " + url)
-        print(sys.exc_info())
-        sys.exit(1)
+    response = session.get(url)
     soup = BeautifulSoup(response.content, 'html.parser')
     tableRows = soup.findAll('tr', {'class': 'tbdata'})
     coursesAndGrades = []
@@ -38,88 +30,70 @@ def findGrades(url, session):
 
 def logIn(url, payload):
     session = requests.Session()
-    print('get user credentials from ' + url)
-    try:
-        response = session.post(url, data=payload)
-    except:
-        traceback.print_exc()
-        print("Cannot connect to " + url)
-        print(sys.exc_info())
-        sys.exit(1)
+    response = session.post(url, data=payload)
 
-    return ['https://almaweb.uni-leipzig.de' + response.headers._store['refresh'][1].split('; URL=')[1], session]
+    return response.headers._store['refresh'][1].split('&ARGUMENTS=')[1], session
 
 
-def figureOutURL(url, session, textToSearchFor):
-    print("find url to " + textToSearchFor)
-    try:
-        response = session.get(url)
-    except:
-        traceback.print_exc()
-        print("Cannot connect to " + url)
-        print(sys.exc_info())
-        sys.exit(1)
-    soup = BeautifulSoup(response.content, 'html.parser')
-    url = soup.find('a', text = textToSearchFor)
-
-    return url.get('href')
-
-
-def checkIfDBIsThere(cur):
-    print("checking if db has been initialized yet")
+def isDBThere(cur):
     try:
         cur.execute('SELECT course FROM grades limit 1')
     except sqlite3.OperationalError as e:
         print(f"db has not been initialized yet: {e}")
-        initDB.createTables(cur)
-    else:
-        print("db has been initialized")
+        return False
 
-        return 0
+    return True
 
 
-def insertOrIgnoreGrade(cur, con, gradesDict, bot):
-    try:
-        for row in gradesDict:
-            cur.execute('SELECT grade FROM grades WHERE course=?', (row['course'],))
-            res = cur.fetchone()
-            if res is None:
-                cur.execute('INSERT INTO grades VALUES(?,?)', (row['course'], row['grade']))
-                con.commit()
-                sendTelegramMessage(bot, 'new grade in ' + row['course'] + ' -> ' + row['grade'])
-            else:
-                print('grade is already in db')
-    except sqlite3.OperationalError as e:
-        print(f"error while working with db: {e}")
-        print("exiting")
-        print(sys.exc_info())
-        sys.exit(1)
+def getNewGradesFromResponse(cur, gradesDict):
+    newGrades = []
+    for row in gradesDict:
+        cur.execute('SELECT grade FROM grades WHERE course=?', (row['course'],))
+        res = cur.fetchone()
+        if res is None:
+            newGrades.append({
+                'course': row['course'],
+                'grade': row['grade']
+            })
+
+    return newGrades
 
 
-def sendTelegramMessage(bot, text):
-    print("send telegram message")
-    bot.send_message(chat_id=os.environ['TELEGRAM_CHAT_ID'], text=text)
+def insertNewGrades(cur, con, gradesDict):
+    for grade in gradesDict:
+        cur.execute('INSERT INTO grades VALUES(?,?)', (grade['course'], grade['grade']))
+    con.commit()
 
-    return 0
+
+def sendTelegramMessage(bot, gradeDict):
+    bot.send_message(chat_id=os.environ['TELEGRAM_CHAT_ID'], text=json.dumps(gradeDict))
 
 
 def initTelegramBot():
-    print("initialize telegram bot")
     return telegram.Bot(token=os.environ['TELEGRAM_TOKEN'])
 
 
+def configureLogger():
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+
+    formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
+
+    file_handler = logging.FileHandler('logs/fetchAlmaWebGrades.log')
+    file_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+
+    return logger
+
+
 def main():
-    print("---")
-    try:
-        #check if script in running in docker container
-        print("starting bot for username: " + os.environ['ALMAWEB_USERNAME'])
-    except KeyError:
-        load_dotenv()
-        print("starting bot for username: " + os.environ['ALMAWEB_USERNAME'])
-    print("utc time now: " + datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'))
+    logger = configureLogger()
+    username = os.environ['ALMAWEB_USERNAME']
+    logger.info('start fetch almaweb grades bot for user ' + username)
 
     loginPayload = {
-        'usrname': os.environ['ALMAWEB_USERNAME'],
+        'usrname': username,
         'pass': os.environ['ALMAWEB_PASSWORD'],
         'APPNAME': 'CampusNet',
         'PRGNAME': 'LOGINCHECK',
@@ -130,33 +104,25 @@ def main():
         'browser': 'platform'
     }
 
-    try:
+    con = initDB.connectToDb()
+    cur = initDB.getCursor(con)
+
+    if isDBThere(cur) is False:
+        logger.info('init db')
+        initDB.createTables(cur)
+
+    paramString, session = logIn('https://almaweb.uni-leipzig.de/scripts/mgrqispi.dll', loginPayload)
+    response = findGrades(
+        'https://almaweb.uni-leipzig.de/scripts/mgrqispi.dll?APPNAME=CampusNet&PRGNAME=EXAMRESULTS&ARGUMENTS=' + paramString,
+        session)
+
+    newGrades = getNewGradesFromResponse(cur, response)
+    logger.info('new grades: ' + json.dumps(newGrades))
+    if len(newGrades) > 0:
+        insertNewGrades(cur, con, newGrades)
         bot = initTelegramBot()
-        con = initDB.connectToDb()
-        cur = initDB.getCursor(con)
-        checkIfDBIsThere(cur)
-        redirectAndSession = logIn('https://almaweb.uni-leipzig.de/scripts/mgrqispi.dll', loginPayload)
-        landingPageUrl = figureOutURL(redirectAndSession[0], redirectAndSession[1], 'Startseite')
-        studiesUrl = figureOutURL('https://almaweb.uni-leipzig.de' + landingPageUrl, redirectAndSession[1], 'Studium')
-        resultsUrl = figureOutURL('https://almaweb.uni-leipzig.de' + studiesUrl, redirectAndSession[1],
-                                  'Prüfungsergebnisse')
-        response = findGrades('https://almaweb.uni-leipzig.de' + resultsUrl, redirectAndSession[1])
-        insertOrIgnoreGrade(cur, con, response, bot)
-    except requests.exceptions.RequestException as e:
-        print(f"Cannot connect to webservice: {e}")
-        traceback.print_exc()
-        print("exiting")
-        print(sys.exc_info())
-        sys.exit(1)
-    except telegram.TelegramError as e:
-        print(f"error while working with telegram api: {e}")
-        traceback.print_exc()
-        print("exiting")
-        print(sys.exc_info())
-        sys.exit(1)
+        sendTelegramMessage(bot, newGrades)
 
 
 if __name__ == '__main__':
     main()
-
-

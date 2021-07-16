@@ -2,3 +2,4 @@
 bot/grades.db
 .idea
 bot/__pycache__/
+bot/logs/*
