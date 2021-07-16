@@ -12,6 +12,8 @@ import initDB
 from datetime import datetime
 from dotenv import load_dotenv
 
+load_dotenv()
+
 
 def findGrades(url, session):
     print("fetching data " + url)

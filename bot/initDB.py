@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 import sqlite3
 import sys
-import os
+
 
 
 def connectToDb():
     try:
-        con = sqlite3.connect(os.environ['DB_FILE_NAME'])
+        con = sqlite3.connect('grades.db')
         return con
     except sqlite3.OperationalError as e:
         print(f"error while establishing connection to db: {e}")
