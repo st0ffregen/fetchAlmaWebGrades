@@ -39,7 +39,6 @@ def isDBThere(cur):
     try:
         cur.execute('SELECT course FROM grades limit 1')
     except sqlite3.OperationalError as e:
-        print(f"db has not been initialized yet: {e}")
         return False
 
     return True
